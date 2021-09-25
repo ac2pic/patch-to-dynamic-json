@@ -105,7 +105,7 @@ class MMU {
     findFrom(name, virtualAddress) {
         return this.find(this.mappings[name], virtualAddress);
     }
-    
+
     find(mappings, virtualAddress) {
         let result = null;
         for (let i = 0; i < mappings.length; i++) {
@@ -113,6 +113,8 @@ class MMU {
             const offset = virtualAddress - mapping.virtualAddress;
             if (offset >= PAGE_SIZE) {
                 continue;
+            } else if (offset < 0) {
+               throw Error('Segmentation Fault!'); 
             } else if (!mapping.leaf) {
                 result = this.find(mapping.mappings, virtualAddress);
             } else {
@@ -227,6 +229,7 @@ class VirtualMachine {
     }
 
     cpu() {
+    
     }
 
 
