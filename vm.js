@@ -7,12 +7,6 @@ const sys_calls = [
     bytesToObject
 ];
 
-const WORD = 4; // bytes
-const PAGE_SIZE = 0x400; // bytes
-const ROM_SIZE = 0x400000;
-const RAM_SIZE = 0x4000000;
-
-
 class ROM {
     constructor(baseAddress, memory) {
         this.startAddress = baseAddress;
@@ -97,6 +91,20 @@ function createNestedMappings(table, fakeAddress, size, partitionSize,  level = 
     return table;
 }
 
+// assumme it is within range the memory range
+function binarySearchMappings(mappings, virtualAddress, startIndex, endIndex, targetRange) {
+    const length = (endIndex + startIndex);
+    const middleIndex = Math.floor(length/2);
+    const offset = virtualAddress - mappings[middleIndex].virtualAddress;
+    if (offset < 0) {
+        return binarySearchMappings(mappings, virtualAddress, startIndex, middleIndex, targetRange);
+    } else if (offset >= targetRange) {
+        return binarySearchMappings(mappings, virtualAddress, middleIndex + 1, endIndex, targetRange);
+    }
+    return mappings[middleIndex];
+}
+
+
 class MMU {
     constructor() {
         this.mappings = {};
@@ -107,22 +115,26 @@ class MMU {
     }
 
     find(mappings, virtualAddress) {
-        let result = null;
-        for (let i = 0; i < mappings.length; i++) {
-            const mapping = mappings[i];
-            const offset = virtualAddress - mapping.virtualAddress;
-            if (offset >= PAGE_SIZE) {
-                continue;
-            } else if (offset < 0) {
-               throw Error('Segmentation Fault!'); 
-            } else if (!mapping.leaf) {
-                result = this.find(mapping.mappings, virtualAddress);
-            } else {
-                result = mapping;
-            }
-            break;
+        // check if it is in the range
+        const firstMapping = mappings[0];
+        if (virtualAddress < firstMapping.virtualAddress) {
+            return null;
         }
-        return result; 
+
+        let VIRTUAL_PAGE_SIZE = mappings[1].virtualAddress - mappings[0].virtualAddress;
+
+        const lastMapping = mappings[mappings.length - 1];
+        if (lastMapping.virtualAddress + VIRTUAL_PAGE_SIZE <= virtualAddress) {
+            return null;
+        }
+        let currNode = binarySearchMappings(mappings, virtualAddress, 0, mappings.length, VIRTUAL_PAGE_SIZE);
+        while (currNode && !currNode.leaf) {
+            const currMappings = currNode.mappings;
+            VIRTUAL_PAGE_SIZE = currMappings[1].virtualAddress - currMappings[0].virtualAddress;
+            currNode = binarySearchMappings(currMappings, virtualAddress, 0, currMappings.length, VIRTUAL_PAGE_SIZE);
+        }
+
+        return currNode; 
     }
 
     findFree(name, pageCount) {
@@ -177,7 +189,7 @@ class MMU {
         }
     }
 
-    add(name, realAddress, virtualAddress) {
+    add(name, virtualAddress, realAddress) {
         const mappings = this.mappings[name];
         const mapping = this.find(mappings, virtualAddress);
         if (mapping == null) {
@@ -195,6 +207,11 @@ class MMU {
         return mapping.realAddress;
     }
 }
+
+const WORD = 4; // bytes
+const PAGE_SIZE = 0x800; // bytes
+const ROM_SIZE = 0x8000000;
+const RAM_SIZE = 0x8000000;
 
 class VirtualMachine {
     constructor(rom) {
@@ -248,7 +265,7 @@ class VirtualMachine {
             virtualAddress = this.mmu.findFree('RAM', 1);
             const page = this.ram.createPage();
             realAddress = page.address[0];
-            this.mmu.add('RAM', realAddress, virtualAddress);
+            this.mmu.add('RAM', virtualAddress, realAddress);
         } else {
             let pageCount = size;
             if (size%PAGE_SIZE) {
@@ -259,7 +276,7 @@ class VirtualMachine {
             for (let i = 0; i < pageCount; i++) {
                 const page = this.ram.createPage();
                 realAddress = page.address[0];
-                this.mmu.add('RAM', realAddress * PAGE_SIZE * i, virtualAddress * PAGE_SIZE * i);
+                this.mmu.add('RAM', virtualAddress * PAGE_SIZE * i, realAddress * PAGE_SIZE * i);
             }
         }
         return virtualAddress;
