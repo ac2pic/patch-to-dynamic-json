@@ -1,284 +1,130 @@
-function bytesToObject(vm, ) {
-
-}
-
-
-const sys_calls = [
-    bytesToObject
-];
-
-class ROM {
-    constructor(baseAddress, memory) {
-        this.startAddress = baseAddress;
-        this.endAddress = baseAddress + memory.length;
-        this.memory = memory;
-    }
-
-}
-
-
-class RAM {
-    constructor(baseAddress, size) {
-        this.startAddress = baseAddress;
-        this.endAddress = baseAddress + size;
-        this.pages = [];
-    }
-
-
-
-    createPage() {
-        const [start, end] = [this.startAddress, this.endAddress];
-        const maxPages = (end - start)/PAGE_SIZE;
-        if (this.pages.length < maxPages) {
-            let baseAddress = start + PAGE_SIZE * this.pages.length;
-            const page = {
-                free: PAGE_SIZE,
-                address: [baseAddress, baseAddress + PAGE_SIZE], // [start, end)
-                memory: []
-            };
-            this.pages.push(page);
-            return page;// new page index
-        }
-        throw Error(`Not enough memory!`);
-    }
-
-    _addressToPage(address) {
-        const pageNumber = (address - this.startAddress)/PAGE_SIZE;
-        if (this.pages.length <= pageNumber) {
-            throw Error('SEG_FAULT');
-        }
-        const page = this.pages[pageNumber];
-        const offset = address - page.address[0];
-        return [page, offset];
-    }
-
-
-    set(address, value) {
-        const [page, offset] = this._addressToPage(address);
-        for (let i = 0; i < WORD; i++) {
-            page.memory[offset + i] = (value & (0xFF << (8 * i))) >>> 0; 
-        }
-    }
-
-    get(address, size) {
-        const [page, offset] = this._addressToPage(address);
-        let value = 0;
-        // little-endian
-        for (let i = 0; i < size; i++) {
-            value += (page.memory[offset + i] & (0xFF << (8 * i))) >>> 0; 
-        }
-        return value;
-    }
-}
-
-function createNestedMappings(table, fakeAddress, size, partitionSize,  level = 0, maxLevel = 0) {
-    const MAPPING_SIZE = size/partitionSize;
-    for (let i = 0; i < partitionSize; i++) {
-        const startAddress = fakeAddress + MAPPING_SIZE * i;
-        const mapConfig = {
-            virtualAddress: startAddress
-        };
-        if (level < maxLevel) {
-            mapConfig.leaf = false;
-            mapConfig.mappings = [];
-            createNestedMappings(mapConfig.mappings, startAddress, MAPPING_SIZE, partitionSize, level + 1, maxLevel);
-        } else {
-            mapConfig.leaf = true;
-            mapConfig.realAddress = 0x0;
-        }
-        table.push(mapConfig);
-    }
-    return table;
-}
-
-// assumme it is within range the memory range
-function binarySearchMappings(mappings, virtualAddress, startIndex, endIndex, targetRange) {
-    const length = (endIndex + startIndex);
-    const middleIndex = Math.floor(length/2);
-    const offset = virtualAddress - mappings[middleIndex].virtualAddress;
-    if (offset < 0) {
-        return binarySearchMappings(mappings, virtualAddress, startIndex, middleIndex, targetRange);
-    } else if (offset >= targetRange) {
-        return binarySearchMappings(mappings, virtualAddress, middleIndex + 1, endIndex, targetRange);
-    }
-    return mappings[middleIndex];
-}
-
+'use strict';
+const browser = globalThis.require == null;
 
 class MMU {
     constructor() {
         this.mappings = {};
-    }
-
-    findFrom(name, virtualAddress) {
-        return this.find(this.mappings[name], virtualAddress);
-    }
-
-    find(mappings, virtualAddress) {
-        // check if it is in the range
-        const firstMapping = mappings[0];
-        if (virtualAddress < firstMapping.virtualAddress) {
-            return null;
-        }
-
-        let VIRTUAL_PAGE_SIZE = mappings[1].virtualAddress - mappings[0].virtualAddress;
-
-        const lastMapping = mappings[mappings.length - 1];
-        if (lastMapping.virtualAddress + VIRTUAL_PAGE_SIZE <= virtualAddress) {
-            return null;
-        }
-        let currNode = binarySearchMappings(mappings, virtualAddress, 0, mappings.length, VIRTUAL_PAGE_SIZE);
-        while (currNode && !currNode.leaf) {
-            const currMappings = currNode.mappings;
-            VIRTUAL_PAGE_SIZE = currMappings[1].virtualAddress - currMappings[0].virtualAddress;
-            currNode = binarySearchMappings(currMappings, virtualAddress, 0, currMappings.length, VIRTUAL_PAGE_SIZE);
-        }
-
-        return currNode; 
-    }
-
-    findFree(name, pageCount) {
-        let base = this.mappings[name]; 
-        let currNode = null;
-        while(currNode == null) {
-            currNode = base;
-            while (true) {
-                let randomTarget;
-                if (Array.isArray(currNode)) {
-                    randomTarget = currNode;
-                } else if (Array.isArray(currNode.mappings)) {
-                    randomTarget = currNode.mappings;
-                }
-
-                if (randomTarget[0].leaf) {
-                    break;
-                }
-
-                let index = Math.floor(Math.random() * randomTarget.length);
-                currNode = randomTarget[index];
-            }
-            const len = currNode.mappings.length;
-            const parentNode = currNode;
-            for (let i = 0; i < len; i++) {
-                if ((len - i) < pageCount) {
-                    currNode = null;
-                    break;
-                }
-                currNode = parentNode.mappings[i];
-                let isFound = true;
-                for (let j = 0;j < pageCount; j++) {
-                    if (currNode.realAddress !== 0) {
-                        isFound = false;
-                        i += j + 1;
-                        break;
-                    }
-                    currNode = parentNode.mappings[i + j];
-                }
-                if (isFound) {
-                    break;
-                }
-            }
-        }
-        return currNode.virtualAddress;
+        this.pageTables = {};
     }
 
     setup(offsets) {
         for (let offset of offsets) {
-            this.mappings[offset.name] = [];
-            createNestedMappings(this.mappings[offset.name], offset.start, offset.size, offset.partitionSize, 0, offset.maxLevel);
+            this.mappings[offset.name] = {
+                address: {
+                    start: offset.start,
+                    end: offset.start + offset.size
+                },
+                // value 0 means free page
+                pages: new Uint16Array((offset.size/PAGE_SIZE) - 1)
+            };
+            this.pageTables[offset.name] = [];
         }
     }
 
-    add(name, virtualAddress, realAddress) {
+    addPageTable(name, proc, baseVirtualAddress, size) {
+        const pageTable = this.pageTables[name];
+        if (!Array.isArray(pageTable[proc])) {
+            pageTable[proc] = [];
+        }
+        pageTable[proc] = {
+            baseVirtualAddress,
+            pages: new Uint16Array(size)
+        };
+
+    }
+
+    set(name, proc, virtualAddress, realAddress) {
+        const pageTable = this.pageTables[name];
+        const procPageTable = pageTable[proc];
+        const offset = virtualAddress - procPageTable.baseVirtualAddress;
+        const pageOffset = realAddress/PAGE_SIZE;
+        procPageTable.pages[offset] = pageOffset;
         const mappings = this.mappings[name];
-        const mapping = this.find(mappings, virtualAddress);
-        if (mapping == null) {
-            throw Error('Segmentation Fault!');
-        }
-        mapping.realAddress = realAddress;
+        mappings.pages[pageOffset] = proc + 1;
     }
 
-    get(name, virtualAddress) {
-        const mappings =  this.mappings[name];
-        const mapping = this.find(mappings, virtualAddress);
-        if (mapping == null) {
-            throw Error('Segmentation Fault!');
+    get(name, proc, virtualAddress) {
+        const pageTable = this.pageTables[name];
+        const procPageTable = pageTable[proc];
+        const offset = virtualAddress - procPageTable.baseVirtualAddress;
+        const pageOffset = procPageTable.pages[offset];
+        const mappings = this.mappings[name];
+        if (mappings.pages[pageOffset] !== proc + 1) {
+            throw Error(`SegFault`);
         }
-        return mapping.realAddress;
+        return pageOffset * PAGE_SIZE;
     }
+
+    // find a single free page
+    findFree(name) {
+        let mapping = this.mappings[name]; 
+        let index;
+        do {
+            index = Math.floor(Math.random() * mapping.pages.length);
+        } while (mapping.pages[index] !== 0);
+        return index * PAGE_SIZE;
+    }
+    
 }
 
 const WORD = 4; // bytes
-const PAGE_SIZE = 0x800; // bytes
-const ROM_SIZE = 0x8000000;
-const RAM_SIZE = 0x8000000;
+const PAGE_SIZE = 0x1000; // bytes
+const RAM_SIZE = 0x10000000; // bytes
+
+function CrossBuffer(size) {
+    if (browser) {
+        const arrayBuffer = new ArrayBuffer(size);
+        const view = new DataView(arrayBuffer);
+        const apis = {};
+        return apis;
+    }
+
+    return Buffer.alloc(size);
+}
 
 class VirtualMachine {
-    constructor(rom) {
-        const baseAddress = 0x10;
-        this.rom = new ROM(baseAddress, rom);
-        this.ram = new RAM(baseAddress, RAM_SIZE);
+    constructor() {
+        this.ram = CrossBuffer(RAM_SIZE);
+        this.proc = [];
         this.mmu = new MMU();
-        this.allocTable = {
-            "small": [], // less than or equal to PAGE_SIZE/2, these will share a page
-            "large": [], // greater than PAGE_SIZE/2, these will always get at least a page
-        };
-
-        this.virtualAddress = {
-            'ROM': 0x40000000, 
-            'RAM': 0xAFFFFFFF,
-        };
-
         this.mmu.setup([{
-            name: 'ROM',
-            start: this.virtualAddress.ROM,
-            size: ROM_SIZE,
-            partitionSize: Math.log2(ROM_SIZE/PAGE_SIZE)/2,
-            maxLevel: 1
-        },{
             name: 'RAM',
-            start: this.virtualAddress.RAM,
+            start: 0x0,
             size: RAM_SIZE,
             partitionSize: Math.log2(RAM_SIZE/PAGE_SIZE)/2,
             maxLevel: 1
         }]);
-        this.regs = Array(32).fill(0);
     }
 
     cpu() {
     
     }
 
+    load() {
+        const procId = this.proc.length;
+        this.proc.push({
+            state: new Uint8Array(1),
+            registers: []
+        });
+
+        this.mmu.addPageTable(procId, [
+            0x40000000
+        ]);
+    }
 
     
 
-    allocate(size) {
-        let realAddress = this.ram.startAddress;
-        let virtualAddress = this.virtualAddress.RAM;
-        let sizeAlignment;
-        if (size%WORD) {
-            sizeAlignment = WORD - (size & (WORD - 1)) + size;
-        } else {
-            sizeAlignment = size;
-        }
-        if (sizeAlignment <= PAGE_SIZE/2) {
-            virtualAddress = this.mmu.findFree('RAM', 1);
-            const page = this.ram.createPage();
-            realAddress = page.address[0];
-            this.mmu.add('RAM', virtualAddress, realAddress);
-        } else {
-            let pageCount = size;
-            if (size%PAGE_SIZE) {
-                pageCount = PAGE_SIZE - (size & (PAGE_SIZE - 1)) + size;
-            }
+    allocate(proc, size) {
 
-            virtualAddress = this.mmu.findFree('RAM', pageCount);
-            for (let i = 0; i < pageCount; i++) {
-                const page = this.ram.createPage();
-                realAddress = page.address[0];
-                this.mmu.add('RAM', virtualAddress * PAGE_SIZE * i, realAddress * PAGE_SIZE * i);
-            }
-        }
-        return virtualAddress;
+        return realAddress;
     }
 }
+
+const vm = new VirtualMachine();
+
+vm.mmu.addPageTable('RAM', 0, 0x4, 50);
+
+const realAddress = vm.mmu.findFree('RAM');
+vm.mmu.set('RAM', 0, 0x4, realAddress);
+
+console.log(realAddress === vm.mmu.get('RAM', 0, 0x4));
